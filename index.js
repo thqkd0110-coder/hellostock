@@ -6,6 +6,7 @@ const { isKrxHolidayToday, isMostRecentUsSessionHoliday } = require("./holidays"
 const templates = require("./templates");
 const { buildComparisonChartUrl } = require("./chart");
 const { fetchHeadlines } = require("./news");
+const { fetchTopThemes, fetchBottomThemes } = require("./themes");
 
 const US_KEYWORDS = ["stock", "dow", "nasdaq", "s&p", "market", "bond", "fed", "oil", "rate"];
 const KR_KEYWORDS = ["코스피", "코스닥", "증시", "환율", "금리", "채권", "외국인", "수급"];
@@ -15,6 +16,15 @@ async function safeHeadlines(market, keywords) {
     return await fetchHeadlines(market, { limit: 3, keywords });
   } catch (err) {
     log(`news fetch failed (${market}):`, err.message || err);
+    return [];
+  }
+}
+
+async function safeThemes(kind) {
+  try {
+    return kind === "top" ? await fetchTopThemes(3) : await fetchBottomThemes(3);
+  } catch (err) {
+    log(`theme fetch failed (${kind}):`, err.message || err);
     return [];
   }
 }
@@ -139,6 +149,8 @@ const JOBS = {
         kospi: await getQuote("kospi"),
         kosdaq: await getQuote("kosdaq"),
         krNews: await safeHeadlines("kr", KR_KEYWORDS),
+        topThemes: await safeThemes("top"),
+        bottomThemes: await safeThemes("bottom"),
       }),
       buildMessage: templates.msg3,
       chartOf: (d) => [
@@ -156,6 +168,8 @@ const JOBS = {
         kospi: await getQuote("kospi"),
         kosdaq: await getQuote("kosdaq"),
         krNews: await safeHeadlines("kr", KR_KEYWORDS),
+        topThemes: await safeThemes("top"),
+        bottomThemes: await safeThemes("bottom"),
       }),
       buildMessage: templates.msg4,
       chartOf: (d) => [

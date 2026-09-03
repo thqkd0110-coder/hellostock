@@ -39,6 +39,17 @@ function newsBlock(title, headlines) {
   return `\n\n${title}\n${lines}`;
 }
 
+function themeLine(t) {
+  const leaders = t.leaders.length ? ` (${t.leaders.join(", ")})` : "";
+  return `• ${t.name} ${fmtPct(t.changePct)}${leaders}`;
+}
+
+function themeBlock(title, themes) {
+  if (!themes || themes.length === 0) return "";
+  const lines = themes.map(themeLine).join("\n");
+  return `\n\n${title}\n${lines}`;
+}
+
 function msg1({ nasdaq, dow, usNews }, now) {
   return `📊 [${mmdd(now)}] 전일 미국 증시 마감 브리핑
 
@@ -58,18 +69,24 @@ ${indexLine("다우존스산업평균", dow)}${newsBlock("📰 오늘의 주요 
   ])}`;
 }
 
-function msg3({ kospi, kosdaq, krNews }, now) {
+function msg3({ kospi, kosdaq, krNews, topThemes, bottomThemes }, now) {
   return `🔔 [${mmdd(now)}] 코스피·코스닥 개장 동향
 
 ${indexLine("코스피", kospi)}
-${indexLine("코스닥", kosdaq)}${newsBlock("📰 관련 뉴스", krNews)}`;
+${indexLine("코스닥", kosdaq)}${themeBlock("🔥 주요 테마", topThemes)}${themeBlock(
+    "👀 관심 테마 (하락 주의)",
+    bottomThemes,
+  )}${newsBlock("📰 관련 뉴스", krNews)}`;
 }
 
-function msg4({ kospi, kosdaq, krNews }, now) {
+function msg4({ kospi, kosdaq, krNews, topThemes, bottomThemes }, now) {
   return `🏁 [${mmdd(now)}] 코스피·코스닥 마감 시황
 
 ${indexLine("코스피", kospi)}
-${indexLine("코스닥", kosdaq)}${newsBlock("📰 마감 관련 뉴스", krNews)}
+${indexLine("코스닥", kosdaq)}${themeBlock("🔥 주요 테마", topThemes)}${themeBlock(
+    "👀 관심 테마 (하락 주의)",
+    bottomThemes,
+  )}${newsBlock("📰 마감 관련 뉴스", krNews)}
 
 오늘 하루도 증시 확인하시느라 고생 많으셨습니다. 편안한 저녁 보내세요.`;
 }
