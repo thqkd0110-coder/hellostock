@@ -1,10 +1,24 @@
 require("dotenv").config();
 
 const cron = require("node-cron");
-const Anthropic = require("@anthropic-ai/sdk");
-const prompts = require("./prompts");
+const { getQuote } = require("./market");
+const { isKrxHolidayToday, isMostRecentUsSessionHoliday } = require("./holidays");
+const templates = require("./templates");
+const { buildComparisonChartUrl } = require("./chart");
+const { fetchHeadlines } = require("./news");
 
-const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5";
+const US_KEYWORDS = ["stock", "dow", "nasdaq", "s&p", "market", "bond", "fed", "oil", "rate"];
+const KR_KEYWORDS = ["코스피", "코스닥", "증시", "환율", "금리", "채권", "외국인", "수급"];
+
+async function safeHeadlines(market, keywords) {
+  try {
+    return await fetchHeadlines(market, { limit: 3, keywords });
+  } catch (err) {
+    log(`news fetch failed (${market}):`, err.message || err);
+    return [];
+  }
+}
+
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -15,76 +29,8 @@ for (const key of ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]) {
   }
 }
 
-const client = new Anthropic();
-
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
-}
-
-// The model has no built-in clock, so we inject the real current KST
-// date/time into every prompt.
-function kstDateLine() {
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "long",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(now).reduce((acc, p) => {
-    acc[p.type] = p.value;
-    return acc;
-  }, {});
-  return `오늘 날짜(한국시간, KST): ${parts.year}-${parts.month}-${parts.day} (${parts.weekday}) ${parts.hour}:${parts.minute}`;
-}
-
-async function askClaude(promptText) {
-  let messages = [{ role: "user", content: promptText }];
-
-  for (let i = 0; i < 6; i++) {
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 8 }],
-      messages,
-    });
-
-    if (response.stop_reason === "pause_turn") {
-      messages.push({ role: "assistant", content: response.content });
-      continue;
-    }
-
-    if (response.stop_reason === "refusal") {
-      throw new Error(`Claude refused: ${JSON.stringify(response.stop_details)}`);
-    }
-
-    return response.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-  }
-
-  throw new Error("Exceeded max resume iterations without a final answer");
-}
-
-function parseDecision(rawText) {
-  const trimmed = rawText.trim();
-  if (trimmed.startsWith("SKIP")) {
-    return { send: false, reason: trimmed.slice(4).trim() };
-  }
-  if (trimmed.startsWith("SEND")) {
-    const message = trimmed.slice(4).replace(/^\s*\n/, "").trim();
-    return { send: true, message };
-  }
-  // Fallback: model didn't follow the format. Treat the whole thing as the
-  // message rather than silently dropping it.
-  log("WARNING: response did not start with SKIP/SEND, sending as-is");
-  return { send: true, message: trimmed };
 }
 
 async function sendTelegram(text) {
@@ -101,40 +47,133 @@ async function sendTelegram(text) {
   return data;
 }
 
-async function runBriefing(name, promptFn) {
+async function sendTelegramPhoto(photoUrl, caption) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, photo: photoUrl, caption }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function runBriefing(name, { skipCheck, fetchData, buildMessage, chartOf }) {
   log(`=== starting ${name} ===`);
   try {
-    const promptText = promptFn(kstDateLine());
-    const raw = await askClaude(promptText);
-    const decision = parseDecision(raw);
-
-    if (!decision.send) {
-      log(`${name}: SKIPPED (${decision.reason || "no reason given"})`);
+    if (skipCheck()) {
+      log(`${name}: SKIPPED (holiday)`);
       return;
     }
 
-    await sendTelegram(decision.message);
-    log(`${name}: sent successfully (${decision.message.length} chars)`);
+    const data = await fetchData();
+    const text = buildMessage(data, new Date());
+
+    let chartUrl = null;
+    if (chartOf) {
+      try {
+        chartUrl = buildComparisonChartUrl(...chartOf(data));
+      } catch (chartErr) {
+        log(`${name}: chart build failed, falling back to text-only -`, chartErr.message);
+      }
+    }
+
+    if (chartUrl && text.length <= 1024) {
+      await sendTelegramPhoto(chartUrl, text);
+    } else if (chartUrl) {
+      await sendTelegramPhoto(chartUrl, "");
+      await sendTelegram(text);
+    } else {
+      await sendTelegram(text);
+    }
+    log(`${name}: sent successfully`);
   } catch (err) {
     log(`${name}: FAILED -`, err.message || err);
   }
 }
 
 const JOBS = {
-  1: ["msg1_us_market_close", prompts.msg1],
-  2: ["msg2_pre_open", prompts.msg2],
-  3: ["msg3_open_snapshot", prompts.msg3],
-  4: ["msg4_close_summary", prompts.msg4],
+  1: [
+    "msg1_us_market_close",
+    {
+      skipCheck: isMostRecentUsSessionHoliday,
+      fetchData: async () => ({
+        nasdaq: await getQuote("nasdaq"),
+        dow: await getQuote("dow"),
+        usNews: await safeHeadlines("us", US_KEYWORDS),
+      }),
+      buildMessage: templates.msg1,
+      chartOf: (d) => [
+        "나스닥 vs 다우 (5일, 기준일 대비 %)",
+        { label: "나스닥", series: d.nasdaq.series },
+        { label: "다우존스", series: d.dow.series },
+      ],
+    },
+  ],
+  2: [
+    "msg2_pre_open",
+    {
+      skipCheck: isKrxHolidayToday,
+      fetchData: async () => ({
+        nasdaq: await getQuote("nasdaq"),
+        dow: await getQuote("dow"),
+        usNews: await safeHeadlines("us", US_KEYWORDS),
+        krNews: await safeHeadlines("kr", KR_KEYWORDS),
+      }),
+      buildMessage: templates.msg2,
+      chartOf: (d) => [
+        "나스닥 vs 다우 (5일, 기준일 대비 %)",
+        { label: "나스닥", series: d.nasdaq.series },
+        { label: "다우존스", series: d.dow.series },
+      ],
+    },
+  ],
+  3: [
+    "msg3_open_snapshot",
+    {
+      skipCheck: isKrxHolidayToday,
+      fetchData: async () => ({
+        kospi: await getQuote("kospi"),
+        kosdaq: await getQuote("kosdaq"),
+        krNews: await safeHeadlines("kr", KR_KEYWORDS),
+      }),
+      buildMessage: templates.msg3,
+      chartOf: (d) => [
+        "코스피 vs 코스닥 (5일, 기준일 대비 %)",
+        { label: "코스피", series: d.kospi.series },
+        { label: "코스닥", series: d.kosdaq.series },
+      ],
+    },
+  ],
+  4: [
+    "msg4_close_summary",
+    {
+      skipCheck: isKrxHolidayToday,
+      fetchData: async () => ({
+        kospi: await getQuote("kospi"),
+        kosdaq: await getQuote("kosdaq"),
+        krNews: await safeHeadlines("kr", KR_KEYWORDS),
+      }),
+      buildMessage: templates.msg4,
+      chartOf: (d) => [
+        "코스피 vs 코스닥 (5일, 기준일 대비 %)",
+        { label: "코스피", series: d.kospi.series },
+        { label: "코스닥", series: d.kosdaq.series },
+      ],
+    },
+  ],
 };
 
 // CLI mode: `node index.js 1` runs one briefing immediately and exits.
-// Useful for manual testing (locally or via `railway run`).
 const cliArg = process.argv[2];
 if (cliArg && JOBS[cliArg]) {
-  const [name, fn] = JOBS[cliArg];
-  runBriefing(name, fn).then(() => process.exit(0));
+  const [name, job] = JOBS[cliArg];
+  runBriefing(name, job).then(() => process.exit(0));
 } else {
-  log(`Scheduler starting (model=${MODEL}). Registering 4 cron jobs (Asia/Seoul, Mon-Fri).`);
+  log("Scheduler starting. Registering 4 cron jobs (Asia/Seoul, Mon-Fri).");
 
   const opts = { timezone: "Asia/Seoul" };
   cron.schedule("0 7 * * 1-5", () => runBriefing(...JOBS[1]), opts);
@@ -144,7 +183,6 @@ if (cliArg && JOBS[cliArg]) {
 
   log("Cron jobs registered: 07:00 / 08:30 / 09:10 / 15:40 KST, Mon-Fri.");
 
-  // Optional health endpoint - only if Railway assigns a PORT.
   if (process.env.PORT) {
     require("http")
       .createServer((_req, res) => res.end("ok"))
