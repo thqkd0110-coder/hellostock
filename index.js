@@ -4,7 +4,6 @@ const cron = require("node-cron");
 const { getQuote } = require("./market");
 const { isKrxHolidayToday, isMostRecentUsSessionHoliday } = require("./holidays");
 const templates = require("./templates");
-const { buildComparisonChartUrl } = require("./chart");
 const { fetchHeadlines } = require("./news");
 const { fetchTopThemes, fetchBottomThemes } = require("./themes");
 
@@ -57,21 +56,7 @@ async function sendTelegram(text) {
   return data;
 }
 
-async function sendTelegramPhoto(photoUrl, caption) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, photo: photoUrl, caption }),
-  });
-  const data = await res.json();
-  if (!data.ok) {
-    throw new Error(`Telegram sendPhoto failed: ${JSON.stringify(data)}`);
-  }
-  return data;
-}
-
-async function runBriefing(name, { skipCheck, fetchData, buildMessage, chartOf }) {
+async function runBriefing(name, { skipCheck, fetchData, buildMessage }) {
   log(`=== starting ${name} ===`);
   try {
     if (skipCheck()) {
@@ -82,23 +67,7 @@ async function runBriefing(name, { skipCheck, fetchData, buildMessage, chartOf }
     const data = await fetchData();
     const text = buildMessage(data, new Date());
 
-    let chartUrl = null;
-    if (chartOf) {
-      try {
-        chartUrl = buildComparisonChartUrl(...chartOf(data));
-      } catch (chartErr) {
-        log(`${name}: chart build failed, falling back to text-only -`, chartErr.message);
-      }
-    }
-
-    if (chartUrl && text.length <= 1024) {
-      await sendTelegramPhoto(chartUrl, text);
-    } else if (chartUrl) {
-      await sendTelegramPhoto(chartUrl, "");
-      await sendTelegram(text);
-    } else {
-      await sendTelegram(text);
-    }
+    await sendTelegram(text);
     log(`${name}: sent successfully`);
   } catch (err) {
     log(`${name}: FAILED -`, err.message || err);
@@ -116,11 +85,6 @@ const JOBS = {
         usNews: await safeHeadlines("us", US_KEYWORDS),
       }),
       buildMessage: templates.msg1,
-      chartOf: (d) => [
-        "나스닥 vs 다우 (5일, 기준일 대비 %)",
-        { label: "나스닥", series: d.nasdaq.series },
-        { label: "다우존스", series: d.dow.series },
-      ],
     },
   ],
   2: [
@@ -134,11 +98,6 @@ const JOBS = {
         krNews: await safeHeadlines("kr", KR_KEYWORDS),
       }),
       buildMessage: templates.msg2,
-      chartOf: (d) => [
-        "나스닥 vs 다우 (5일, 기준일 대비 %)",
-        { label: "나스닥", series: d.nasdaq.series },
-        { label: "다우존스", series: d.dow.series },
-      ],
     },
   ],
   3: [
@@ -153,11 +112,6 @@ const JOBS = {
         bottomThemes: await safeThemes("bottom"),
       }),
       buildMessage: templates.msg3,
-      chartOf: (d) => [
-        "코스피 vs 코스닥 (5일, 기준일 대비 %)",
-        { label: "코스피", series: d.kospi.series },
-        { label: "코스닥", series: d.kosdaq.series },
-      ],
     },
   ],
   4: [
@@ -172,11 +126,6 @@ const JOBS = {
         bottomThemes: await safeThemes("bottom"),
       }),
       buildMessage: templates.msg4,
-      chartOf: (d) => [
-        "코스피 vs 코스닥 (5일, 기준일 대비 %)",
-        { label: "코스피", series: d.kospi.series },
-        { label: "코스닥", series: d.kosdaq.series },
-      ],
     },
   ],
 };
